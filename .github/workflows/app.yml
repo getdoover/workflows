@@ -31,6 +31,15 @@ on:
         type: string
         required: false
         default: ubuntu-latest
+      lint-blocking:
+        description: >
+          Fail the build on lint or formatting failures. Off by default because the
+          workflows this replaced ran ruff with continue-on-error, and a CI
+          migration should not quietly start failing builds it previously passed.
+          Turn on per repo as each one gets clean.
+        type: boolean
+        required: false
+        default: false
       test-image:
         type: string
         required: false
@@ -88,8 +97,22 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - run: doover app lint "${{ matrix.app.dir }}"
+      # Advisory, matching what the workflows this replaced did (`run-linting.yml`
+      # set `continue-on-error: true` on both ruff steps). Making lint blocking
+      # across the fleet is a deliberate decision, not something a CI migration
+      # should smuggle in — flip `lint-blocking` to true once the repos are clean.
+      - name: Lint
+        continue-on-error: ${{ !inputs.lint-blocking }}
+        run: doover app lint "${{ matrix.app.dir }}"
 
+      # Checks by default; `--fix` is what makes it write. So no flag here.
+      - name: Check formatting
+        continue-on-error: ${{ !inputs.lint-blocking }}
+        run: doover app format "${{ matrix.app.dir }}"
+
+      # Schemas *are* blocking: a schema that does not match its Python is a
+      # deployment that misbehaves on a device, not a style preference.
+      #
       # Every app's schemas are checked on each invocation; --app-name only
       # selects which is re-exported from Python source, so running per app is
       # what stops either app's committed schema drifting.
