@@ -1,0 +1,233 @@
+name: Doover App
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: >
+          Directory to search for apps. Defaults to the repository root. A
+          monorepo passes one app directory per caller file, alongside a `paths:`
+          filter, so only the app that changed is rebuilt.
+        type: string
+        required: false
+        default: "."
+      staging:
+        description: >
+          Also publish and release to the staging control plane. The image itself
+          is only ever pushed to the production registry (see NOTES.md), so this
+          publishes with --no-build against a digest that already exists.
+        type: boolean
+        required: false
+        default: false
+      release:
+        description: >
+          Create an immutable version. This is what triggers server-side image
+          signing, so turning it off leaves the pushed image unsigned.
+        type: boolean
+        required: false
+        default: true
+      runs-on:
+        description: e.g. ubuntu-24.04-arm to build arm64 natively rather than under QEMU.
+        type: string
+        required: false
+        default: ubuntu-latest
+      test-image:
+        type: string
+        required: false
+        default: spaneng/doover_device_base
+      python-version:
+        type: string
+        required: false
+        default: "3.11"
+      environment:
+        description: GitHub environment to gate the release behind. Empty for none.
+        type: string
+        required: false
+        default: ""
+
+env:
+  DOOVER_CONTROL_API_BASE_URL: https://api.doover.com
+  DOOVER_OIDC_AUDIENCE: https://api.doover.com
+
+jobs:
+  # The matrix the old workflows hard-coded, now read from the repo. Handles both
+  # layouts: several apps in one doover_config.json, and several self-contained
+  # app directories.
+  discover:
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      apps: ${{ steps.find.outputs.apps }}
+      images: ${{ steps.find.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: getdoover/setup-doover@v1
+        with:
+          python-version: ${{ inputs.python-version }}
+      - id: find
+        shell: bash
+        run: |
+          apps="$(doover app discover '${{ inputs.app }}' --json)"
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+          # Only apps that actually build an image reach the push/release jobs.
+          # `builds_image` comes from the presence of a Dockerfile and cannot be
+          # inferred from `type`: a DEV app may deploy a third-party image and
+          # hold no source at all, and a PRO app ships a package.zip instead.
+          echo "images=$(echo "$apps" | jq -c '[.[] | select(.builds_image)]')" >> "$GITHUB_OUTPUT"
+          echo "$apps" | jq -r '.[] | "  \(.name)  dir=\(.dir)  image=\(.builds_image)"'
+
+  check:
+    needs: discover
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: false # one broken app must not mask the others
+      matrix:
+        app: ${{ fromJson(needs.discover.outputs.apps) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: getdoover/setup-doover@v1
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - run: doover app lint "${{ matrix.app.dir }}"
+
+      # Every app's schemas are checked on each invocation; --app-name only
+      # selects which is re-exported from Python source, so running per app is
+      # what stops either app's committed schema drifting.
+      - name: Validate schemas
+        run: |
+          doover config-schema validate "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
+          doover ui-schema validate "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
+
+  # Kept as its own job because the tests need a job-level `container:`.
+  test:
+    needs: discover
+    runs-on: ${{ inputs.runs-on }}
+    container:
+      image: ${{ inputs.test-image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.discover.outputs.apps) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - name: Install the project
+        working-directory: ${{ matrix.app.dir }}
+        run: |
+          apt update && apt install -y git
+          uv sync --locked --all-extras --dev
+      - name: Run tests
+        working-directory: ${{ matrix.app.dir }}
+        run: uv run pytest tests
+
+  # Importing the app package exercises the whole dependency graph — pydoover, the
+  # app's own imports, native wheels — inside the built image, where a missing
+  # system library actually shows up. Carried over verbatim in intent.
+  smoke:
+    needs: discover
+    if: needs.discover.outputs.images != '[]'
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.discover.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.app.dir }}
+          load: true
+          tags: smoke:latest
+          cache-from: type=gha
+      - name: Import the app inside the image
+        working-directory: ${{ matrix.app.dir }}
+        run: |
+          MODULE=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['scripts']['doover-app-run'].split(':')[0])")
+          echo "Importing '$MODULE' inside the container..."
+          docker run --rm --entrypoint python smoke:latest -c "import $MODULE; print('container import OK')"
+
+  # Push and release in one job per app, deliberately.
+  #
+  # The original split them so a release matrix could fan out over environments.
+  # With a single registry there is nothing to fan out over, and merging them
+  # fixes a real problem: a matrix job's `outputs` are not per-entry — whichever
+  # leg finishes last overwrites the rest — so handing a digest from a matrix
+  # `push` job to a matrix `release` job silently releases the wrong image in a
+  # repo with more than one app. Keeping the digest inside one job removes that
+  # class of bug entirely.
+  publish:
+    needs: [discover, check, test, smoke]
+    if: |
+      always() && needs.discover.outputs.images != '[]'
+      && needs.check.result == 'success'
+      && needs.test.result == 'success'
+      && (needs.smoke.result == 'success' || needs.smoke.result == 'skipped')
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false # one app failing must not block the others
+      matrix:
+        app: ${{ fromJson(needs.discover.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: getdoover/setup-doover@v1
+        with:
+          python-version: ${{ inputs.python-version }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Publish before pushing: the registry credential is minted against this
+      # application's publish permission and scoped to its repository, so the app
+      # has to exist control-side before there is anything to mint against.
+      - name: Register the app and log in to the registry
+        run: |
+          doover app publish "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}" --no-release
+          doover app registry-login --app-name "${{ matrix.app.name }}"
+
+      - id: push
+        name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.app.dir }}
+          platforms: ${{ matrix.app.platforms || 'linux/arm64,linux/amd64' }}
+          push: true
+          tags: ${{ matrix.app.image_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Binds the version to the exact image just pushed. A pull request releases
+      # as an alpha so it never auto-selects as Latest.
+      - name: Release
+        if: inputs.release
+        env:
+          RELEASE_NOTES: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+        run: >-
+          doover app release "${{ matrix.app.dir }}"
+          --app-name "${{ matrix.app.name }}"
+          --digest "${{ steps.push.outputs.digest }}"
+          --commit "${{ github.event.pull_request.head.sha || github.sha }}"
+          --notes "$RELEASE_NOTES"
+          ${{ github.event_name == 'pull_request' && '--alpha' || '' }}
+
+      # The image only ever lives in the production registry, so staging gets the
+      # app record and version against a digest that already exists — never a
+      # second build, and never a push to a second registry.
+      - name: Also release to staging
+        if: inputs.release && inputs.staging
+        env:
+          DOOVER_CONTROL_API_BASE_URL: https://api.staging.udoover.com
+          DOOVER_OIDC_AUDIENCE: https://api.staging.udoover.com
+          RELEASE_NOTES: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+        run: >-
+          doover app publish "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
+          --no-build --no-release
+          && doover app release "${{ matrix.app.dir }}"
+          --app-name "${{ matrix.app.name }}"
+          --digest "${{ steps.push.outputs.digest }}"
+          --commit "${{ github.event.pull_request.head.sha || github.sha }}"
+          --notes "$RELEASE_NOTES"
+          ${{ github.event_name == 'pull_request' && '--alpha' || '' }}

@@ -1,0 +1,44 @@
+# Monorepo: one copy of this file per app directory, named after the app.
+#
+# Use this shape when a repo holds several apps in *separate, self-contained*
+# directories — each with its own doover_config.json, Dockerfile, manifest and
+# tests. The `paths:` filter then means changing one app rebuilds only that app.
+#
+# Substitute your app's directory name for `my_app` in all four places below.
+# Nothing else differs between copies, so `doover app update-workflow` can
+# generate them from `doover app discover`.
+#
+# If your apps are instead declared together in one doover_config.json at the
+# repository root, use single-app.yml — a change there affects every app in that
+# file, so there is nothing to filter on and one caller covers them all.
+#
+# Keep app directories self-contained. If shared code appears at the repository
+# root, these filters stop rebuilding the apps that depend on it and nothing fails
+# — the apps just quietly go stale. Extract shared code into a package rather than
+# adding root paths to every filter.
+name: Doover App — my_app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "my_app/**"
+      # So editing this file re-runs it, otherwise a workflow fix appears to do
+      # nothing until the app itself next changes.
+      - ".github/workflows/my_app.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "my_app/**"
+      - ".github/workflows/my_app.yml"
+
+permissions:
+  contents: read
+  id-token: write # the CLI's trusted-publisher OIDC flow; no Doover secret needed
+
+jobs:
+  app:
+    uses: getdoover/workflows/.github/workflows/app.yml@v1
+    with:
+      app: my_app
+    secrets: inherit

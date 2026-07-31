@@ -1,0 +1,14 @@
+# This repo holds YAML and markdown only — no build, no dependencies, no
+# virtualenv. So this is deliberately short rather than the Python .gitignore the
+# app repos carry: nothing here produces artefacts.
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local secrets, if anything is ever tested against a real environment
+.env

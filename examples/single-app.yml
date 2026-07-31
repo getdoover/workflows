@@ -1,0 +1,23 @@
+# The whole file. Replaces build-image.yml, lint-and-test.yml, run-linting.yml,
+# run-tests.yml and validate-schema.yml.
+#
+# `on:` and `permissions:` cannot come from the reusable workflow — a caller must
+# declare its own. They are therefore the only part of this file that a central
+# bump cannot reach, so they are deliberately broad: every decision about *what
+# to do* on a given ref is made in app.yml@v1.
+name: Doover App
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # the CLI's trusted-publisher OIDC flow; no Doover secret
+
+jobs:
+  app:
+    uses: getdoover/workflows/.github/workflows/app.yml@v1
+    secrets: inherit
