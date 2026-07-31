@@ -60,7 +60,7 @@ jobs:
       images: ${{ steps.find.outputs.images }}
     steps:
       - uses: actions/checkout@v4
-      - uses: getdoover/setup-doover@v1
+      - uses: getdoover/setup-doover@main
         with:
           python-version: ${{ inputs.python-version }}
       - id: find
@@ -84,7 +84,7 @@ jobs:
         app: ${{ fromJson(needs.discover.outputs.apps) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: getdoover/setup-doover@v1
+      - uses: getdoover/setup-doover@main
         with:
           python-version: ${{ inputs.python-version }}
 
@@ -174,7 +174,7 @@ jobs:
         app: ${{ fromJson(needs.discover.outputs.images) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: getdoover/setup-doover@v1
+      - uses: getdoover/setup-doover@main
         with:
           python-version: ${{ inputs.python-version }}
       - uses: docker/setup-qemu-action@v3
