@@ -139,9 +139,7 @@ jobs:
           cache-dependency-glob: "**/uv.lock"
       - name: Install the project
         working-directory: ${{ matrix.app.dir }}
-        run: |
-          apt update && apt install -y git
-          uv sync --locked --all-extras --dev
+        run: uv sync --locked --all-extras --dev
       - name: Run tests
         working-directory: ${{ matrix.app.dir }}
         run: uv run pytest tests
