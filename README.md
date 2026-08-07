@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   app:
-    uses: getdoover/workflows/.github/workflows/app.yml@v1
+    uses: getdoover/workflows/.github/workflows/app.yml@main
     secrets: inherit
 ```
 

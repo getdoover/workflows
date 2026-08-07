@@ -4,7 +4,7 @@
 # `on:` and `permissions:` cannot come from the reusable workflow — a caller must
 # declare its own. They are therefore the only part of this file that a central
 # bump cannot reach, so they are deliberately broad: every decision about *what
-# to do* on a given ref is made in app.yml@v1.
+# to do* on a given ref is made in app.yml@main.
 name: Doover App
 
 on:
@@ -19,5 +19,5 @@ permissions:
 
 jobs:
   app:
-    uses: getdoover/workflows/.github/workflows/app.yml@v1
+    uses: getdoover/workflows/.github/workflows/app.yml@main
     secrets: inherit
