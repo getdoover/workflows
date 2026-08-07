@@ -56,6 +56,7 @@ else a repo needs, not for talking to Doover.
 | `test` | pytest inside `spaneng/doover_device_base` |
 | `smoke` | build the image, then `import <module>` *inside* it — where a missing system library actually surfaces |
 | `publish` | register, log in, buildx push, then release bound to the pushed digest |
+| `publish-package` | the other deployable: `./build.sh`, upload `package.zip`, release — processors, reports and integrations |
 
 `fail-fast: false` throughout, so one broken app never masks the others. Pull
 requests release as `--alpha`, so a PR version never auto-selects as Latest.
