@@ -67,6 +67,7 @@ jobs:
     outputs:
       apps: ${{ steps.find.outputs.apps }}
       images: ${{ steps.find.outputs.images }}
+      packages: ${{ steps.find.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
       - uses: getdoover/setup-doover@main
@@ -82,7 +83,12 @@ jobs:
           # inferred from `type`: a DEV app may deploy a third-party image and
           # hold no source at all, and a PRO app ships a package.zip instead.
           echo "images=$(echo "$apps" | jq -c '[.[] | select(.builds_image)]')" >> "$GITHUB_OUTPUT"
-          echo "$apps" | jq -r '.[] | "  \(.name)  dir=\(.dir)  image=\(.builds_image)"'
+          # The other deployable: processors, reports and integrations ship a
+          # package.zip instead of an image. They are published here rather than
+          # by hand so a processor release is reproducible from a commit like
+          # every other release.
+          echo "packages=$(echo "$apps" | jq -c '[.[] | select(.builds_package)]')" >> "$GITHUB_OUTPUT"
+          echo "$apps" | jq -r '.[] | "  \(.name)  dir=\(.dir)  image=\(.builds_image)  package=\(.builds_package)"'
 
   check:
     needs: discover
@@ -252,3 +258,71 @@ jobs:
           --commit "${{ github.event.pull_request.head.sha || github.sha }}"
           --notes "$RELEASE_NOTES"
           ${{ github.event_name == 'pull_request' && '--alpha' || '' }}
+
+  # Processors, reports and integrations. Same shape as `publish`, but the
+  # deployable is a package.zip built by the app's ./build.sh and uploaded to the
+  # control plane, so there is no registry, no buildx and no digest to release
+  # against — the uploaded source *is* the artefact.
+  #
+  # A separate job rather than a branch inside `publish`: that one needs qemu,
+  # buildx and a registry login this never uses, and matrix entries cannot skip
+  # steps cheaply. Both are gated on the same checks, so a repo holding an app of
+  # each kind publishes both from one run. There is no `smoke` equivalent: a
+  # package app has no image to import inside.
+  publish-package:
+    needs: [discover, check, test]
+    if: |
+      always() && needs.discover.outputs.packages != '[]'
+      && needs.check.result == 'success'
+      && needs.test.result == 'success'
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false # one app failing must not block the others
+      matrix:
+        app: ${{ fromJson(needs.discover.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: getdoover/setup-doover@main
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # Builds package.zip (./build.sh) and uploads it. Split from the release
+      # below for the same reason the image job splits them: publish registers
+      # the app and its source, release is what creates the immutable version.
+      - name: Publish the package
+        run: >-
+          doover app publish "${{ matrix.app.dir }}"
+          --app-name "${{ matrix.app.name }}" --no-release
+
+      - name: Release
+        if: inputs.release
+        env:
+          RELEASE_NOTES: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+        run: >-
+          doover app release "${{ matrix.app.dir }}"
+          --app-name "${{ matrix.app.name }}"
+          --commit "${{ github.event.pull_request.head.sha || github.sha }}"
+          --notes "$RELEASE_NOTES"
+          ${{ github.event_name == 'pull_request' && '--alpha' || '' }}
+
+      # Staging is a separate control plane, so unlike an image — which both
+      # environments pull from the one registry — the package has to be uploaded
+      # there as well. `--no-build-package` reuses the zip built above instead of
+      # running ./build.sh again, so both environments get an identical upload.
+      - name: Also publish and release to staging
+        if: inputs.staging
+        env:
+          DOOVER_CONTROL_API_BASE_URL: https://api.staging.udoover.com
+          DOOVER_OIDC_AUDIENCE: https://api.staging.udoover.com
+          RELEASE_NOTES: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+        run: |
+          doover app publish "${{ matrix.app.dir }}" \
+            --app-name "${{ matrix.app.name }}" --no-build-package --no-release
+          if [ "${{ inputs.release }}" = "true" ]; then
+            doover app release "${{ matrix.app.dir }}" \
+              --app-name "${{ matrix.app.name }}" \
+              --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --notes "$RELEASE_NOTES" \
+              ${{ github.event_name == 'pull_request' && '--alpha' || '' }}
+          fi
