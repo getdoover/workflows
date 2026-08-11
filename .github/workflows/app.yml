@@ -173,9 +173,15 @@ jobs:
       - name: Import the app inside the image
         working-directory: ${{ matrix.app.dir }}
         run: |
-          MODULE=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['scripts']['doover-app-run'].split(':')[0])")
-          echo "Importing '$MODULE' inside the container..."
-          docker run --rm --entrypoint python smoke:latest -c "import $MODULE; print('container import OK')"
+          MODULES=$(python3 -c "import tomllib; s = tomllib.load(open('pyproject.toml','rb'))['project'].get('scripts', {}); print(' '.join(sorted({t.split(':')[0] for n, t in s.items() if n == 'doover-app-run' or n.startswith('doover-app-run-')})))")
+          if [ -z "$MODULES" ]; then
+            echo "No doover-app-run* entrypoint in pyproject.toml — nothing to import."
+            exit 0
+          fi
+          for MODULE in $MODULES; do
+            echo "Importing '$MODULE' inside the container..."
+            docker run --rm --entrypoint python smoke:latest -c "import $MODULE; print('$MODULE import OK')"
+          done
 
   # Push and release in one job per app, deliberately.
   #

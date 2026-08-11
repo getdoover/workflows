@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   app:
-    uses: getdoover/workflows/.github/workflows/app.yml@v1
+    uses: getdoover/workflows/.github/workflows/app.yml@main
     secrets: inherit
 ```
 
@@ -79,8 +79,17 @@ That is what keeps the caller identical across repos.
 
 ## Versioning
 
-Cut `v1.0.0` and move a floating `v1` to it, the way the official actions do.
-Callers pin `@v1` and pick up fixes; anyone needing determinism pins the patch.
+Callers pin `@main`, deliberately and long-term. The point of this repo is to
+change what every app repo does without editing 55 workflow files, and a tag —
+even a floating `v1` — is one more thing to move before a fix reaches the fleet.
+
+Know what that buys and what it costs. A push here is live everywhere on the next
+run, with no reviewed ref to sit behind and nothing to roll back to but another
+push. These jobs hold `id-token: write` and can mint Doover publish credentials.
+So treat main as production: land changes by PR, and exercise `publish` /
+`publish-package` against a real repo before merging.
+
+Anyone needing determinism pins a SHA in their own caller.
 
 See `NOTES.md` for the design decisions, the open question about `staging`, and
 what still has to ship before this can run.
