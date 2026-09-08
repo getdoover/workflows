@@ -303,6 +303,18 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
+      # A multi-arch build can fill the runner before it finishes: doover-tunnels'
+      # first five-arch build died with "No space left on device" ~30 minutes in,
+      # while the four-arch app controller had room. These are the big
+      # preinstalled toolchains no Doover app uses, and dropping them frees
+      # ~25GB. Never fatal -- a layout change upstream must not fail a build.
+      - name: Free disk space
+        continue-on-error: true
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
       # Publish before pushing: the registry credential is minted against this
       # application's publish permission and scoped to its repository, so the app
       # has to exist control-side before there is anything to mint against.
