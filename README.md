@@ -53,13 +53,32 @@ else a repo needs, not for talking to Doover.
 |---|---|
 | `discover` | `doover app discover --json` builds the matrix, so no app name is ever hard-coded |
 | `check` | lint, plus config and UI schema validation per app |
-| `test` | pytest inside `spaneng/doover_device_base` |
-| `smoke` | build the image, then `import <module>` *inside* it — where a missing system library actually surfaces |
+| `test` | pytest inside `spaneng/doover_device_base` — Python apps |
+| `test_rust` | `cargo test --locked` on the runner — Rust apps |
+| `smoke` | build the image, then exercise it *inside* — `import <module>` for a Python app, the binary's `export` subcommand for a Rust one — where a missing system library actually surfaces |
 | `publish` | register, log in, buildx push, then release bound to the pushed digest |
 | `publish-package` | the other deployable: `./build.sh`, upload `package.zip`, release — processors, reports and integrations |
 
 `fail-fast: false` throughout, so one broken app never masks the others. Pull
 requests release as `--alpha`, so a PR version never auto-selects as Latest.
+
+## Python and Rust
+
+An app is whichever its manifest says: a `Cargo.toml` beside `doover_config.json`
+makes it Rust, a `pyproject.toml` makes it Python, and `discover` reports that as
+`language`. A monorepo can hold one of each.
+
+Only the toolchain changes. `check` runs ruff or `cargo clippy`/`cargo fmt`, and
+`smoke` imports the module or runs the binary — both branch per step on
+`matrix.app.language`. Tests are the exception: pytest needs the device-base
+container and cargo needs the runner, and `container:` is a job-level setting
+that cannot vary per matrix entry, so those are two jobs. Either may skip, and
+`publish` treats a skip as a pass.
+
+Schema validation does not branch at all: the CLI runs whichever exporter the app
+has — `uv run export-config`, or the binary's `export` subcommand, which writes
+the config and UI schemas together. An app that holds no config of its own says
+so with `"export_config_command": "NO_EXPORT"` and is skipped rather than failed.
 
 ## Inputs
 

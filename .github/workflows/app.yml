@@ -68,6 +68,8 @@ jobs:
       apps: ${{ steps.find.outputs.apps }}
       images: ${{ steps.find.outputs.images }}
       packages: ${{ steps.find.outputs.packages }}
+      py_apps: ${{ steps.find.outputs.py_apps }}
+      rs_apps: ${{ steps.find.outputs.rs_apps }}
     steps:
       - uses: actions/checkout@v4
       - uses: getdoover/setup-doover@main
@@ -88,7 +90,14 @@ jobs:
           # by hand so a processor release is reproducible from a commit like
           # every other release.
           echo "packages=$(echo "$apps" | jq -c '[.[] | select(.builds_package)]')" >> "$GITHUB_OUTPUT"
-          echo "$apps" | jq -r '.[] | "  \(.name)  dir=\(.dir)  image=\(.builds_image)  package=\(.builds_package)"'
+          # Tests are the one thing that cannot branch inside a job: pytest wants
+          # the device-base container and cargo wants the runner, and `container:`
+          # is set per job, not per matrix entry. So the test job is split by
+          # language and each gets its own matrix. Everything else branches per
+          # step on `matrix.app.language`.
+          echo "py_apps=$(echo "$apps" | jq -c '[.[] | select(.language == "py")]')" >> "$GITHUB_OUTPUT"
+          echo "rs_apps=$(echo "$apps" | jq -c '[.[] | select(.language == "rs")]')" >> "$GITHUB_OUTPUT"
+          echo "$apps" | jq -r '.[] | "  \(.name)  dir=\(.dir)  lang=\(.language)  image=\(.builds_image)  package=\(.builds_package)"'
 
   check:
     needs: discover
@@ -103,40 +112,79 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
+      # Rust is preinstalled on the GitHub runners, rustfmt and clippy included,
+      # so there is no toolchain to set up — only the build artefacts to keep,
+      # which is what makes the schema export below cheap the second time.
+      - name: Cache cargo
+        if: matrix.app.language == 'rs'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.app.dir }}/target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles(format('{0}/Cargo.lock', matrix.app.dir)) }}
+          restore-keys: ${{ runner.os }}-cargo-check-
+
       # Advisory, matching what the workflows this replaced did (`run-linting.yml`
       # set `continue-on-error: true` on both ruff steps). Making lint blocking
       # across the fleet is a deliberate decision, not something a CI migration
       # should smuggle in — flip `lint-blocking` to true once the repos are clean.
       - name: Lint
+        if: matrix.app.language != 'rs'
         continue-on-error: ${{ !inputs.lint-blocking }}
         run: doover app lint "${{ matrix.app.dir }}"
 
       # Checks by default; `--fix` is what makes it write. So no flag here.
       - name: Check formatting
+        if: matrix.app.language != 'rs'
         continue-on-error: ${{ !inputs.lint-blocking }}
         run: doover app format "${{ matrix.app.dir }}"
 
-      # Schemas *are* blocking: a schema that does not match its Python is a
+      # The Rust equivalents. `-D warnings` because a clippy warning is the
+      # closest thing Rust has to the ruff findings above, and the repos that
+      # have one already run it that way.
+      - name: Lint (cargo clippy)
+        if: matrix.app.language == 'rs'
+        continue-on-error: ${{ !inputs.lint-blocking }}
+        working-directory: ${{ matrix.app.dir }}
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Check formatting (cargo fmt)
+        if: matrix.app.language == 'rs'
+        continue-on-error: ${{ !inputs.lint-blocking }}
+        working-directory: ${{ matrix.app.dir }}
+        run: cargo fmt --all -- --check
+
+      # Schemas *are* blocking: a schema that does not match its source is a
       # deployment that misbehaves on a device, not a style preference.
       #
+      # Language-agnostic by this point: the CLI runs the app's own exporter,
+      # `uv run export-config` for a Python app and the binary's `export`
+      # subcommand for a Rust one, and an app declaring `NO_EXPORT` because it
+      # holds no config is skipped rather than failed.
+      #
       # Every app's schemas are checked on each invocation; --app-name only
-      # selects which is re-exported from Python source, so running per app is
-      # what stops either app's committed schema drifting.
+      # selects which is re-exported from source, so running per app is what
+      # stops either app's committed schema drifting.
       - name: Validate schemas
         run: |
           doover config-schema validate "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
           doover ui-schema validate "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
 
-  # Kept as its own job because the tests need a job-level `container:`.
+  # Kept as its own job because the tests need a job-level `container:` — which
+  # is also why this is per language rather than a branch inside one job:
+  # `container:` cannot be set per matrix entry.
   test:
     needs: discover
+    if: needs.discover.outputs.py_apps != '[]'
     runs-on: ${{ inputs.runs-on }}
     container:
       image: ${{ inputs.test-image }}
     strategy:
       fail-fast: false
       matrix:
-        app: ${{ fromJson(needs.discover.outputs.apps) }}
+        app: ${{ fromJson(needs.discover.outputs.py_apps) }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -149,6 +197,32 @@ jobs:
       - name: Run tests
         working-directory: ${{ matrix.app.dir }}
         run: uv run pytest tests
+
+  # The Rust half. On the runner rather than in the device-base container: the
+  # toolchain is preinstalled there, and a Rust app's tests are unit tests
+  # against its own crate, not against a device image.
+  test_rust:
+    needs: discover
+    if: needs.discover.outputs.rs_apps != '[]'
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.discover.outputs.rs_apps) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.app.dir }}/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles(format('{0}/Cargo.lock', matrix.app.dir)) }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+      - name: Run tests
+        working-directory: ${{ matrix.app.dir }}
+        run: cargo test --locked
 
   # Importing the app package exercises the whole dependency graph — pydoover, the
   # app's own imports, native wheels — inside the built image, where a missing
@@ -170,7 +244,20 @@ jobs:
           load: true
           tags: smoke:latest
           cache-from: type=gha
+      # A Rust app image is a static binary on scratch: nothing to import, and
+      # no shell to import it with. Its equivalent is the binary's own `export`
+      # subcommand, which exercises the same thing the import did — the binary
+      # runs on the base at all, and its schema code is reachable — without
+      # needing an agent. Skipped for an app that declares no config, since
+      # there is then nothing for `export` to write.
+      - name: Run the binary inside the image
+        if: matrix.app.language == 'rs' && matrix.app.exports_config
+        run: |
+          docker run --rm smoke:latest export /tmp/doover_config.json \
+            --app-name "${{ matrix.app.name }}"
+
       - name: Import the app inside the image
+        if: matrix.app.language != 'rs'
         working-directory: ${{ matrix.app.dir }}
         run: |
           MODULES=$(python3 -c "import tomllib; s = tomllib.load(open('pyproject.toml','rb'))['project'].get('scripts', {}); print(' '.join(sorted({t.split(':')[0] for n, t in s.items() if n == 'doover-app-run' or n.startswith('doover-app-run-')})))")
@@ -193,11 +280,12 @@ jobs:
   # repo with more than one app. Keeping the digest inside one job removes that
   # class of bug entirely.
   publish:
-    needs: [discover, check, test, smoke]
+    needs: [discover, check, test, test_rust, smoke]
     if: |
       always() && needs.discover.outputs.images != '[]'
       && needs.check.result == 'success'
-      && needs.test.result == 'success'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.test_rust.result == 'success' || needs.test_rust.result == 'skipped')
       && (needs.smoke.result == 'success' || needs.smoke.result == 'skipped')
     runs-on: ${{ inputs.runs-on }}
     environment: ${{ inputs.environment }}
@@ -276,11 +364,12 @@ jobs:
   # each kind publishes both from one run. There is no `smoke` equivalent: a
   # package app has no image to import inside.
   publish-package:
-    needs: [discover, check, test]
+    needs: [discover, check, test, test_rust]
     if: |
       always() && needs.discover.outputs.packages != '[]'
       && needs.check.result == 'success'
-      && needs.test.result == 'success'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.test_rust.result == 'success' || needs.test_rust.result == 'skipped')
     runs-on: ${{ inputs.runs-on }}
     environment: ${{ inputs.environment }}
     strategy:
