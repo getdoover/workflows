@@ -252,8 +252,10 @@ jobs:
       # there is then nothing for `export` to write.
       - name: Run the binary inside the image
         if: matrix.app.language == 'rs' && matrix.app.exports_config
+        # Written to / rather than /tmp: these images are a static binary on
+        # `scratch`, which has no /tmp for the export to land in.
         run: |
-          docker run --rm smoke:latest export /tmp/doover_config.json \
+          docker run --rm smoke:latest export /doover_config.json \
             --app-name "${{ matrix.app.name }}"
 
       - name: Import the app inside the image
