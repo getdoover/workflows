@@ -237,7 +237,29 @@ jobs:
         app: ${{ fromJson(needs.discover.outputs.images) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: getdoover/setup-doover@main
+        with:
+          python-version: ${{ inputs.python-version }}
       - uses: docker/setup-buildx-action@v3
+
+      # An app whose Dockerfile pulls a base image from the Doover registry --
+      # doover-device-runtime assembles itself from three other apps' images --
+      # needs a credential here, and this job had none: buildx fell back to an
+      # anonymous token request, which the realm refuses outright. Registering
+      # the CLI's credential helper points docker at a session token minted over
+      # the same trusted-publisher OIDC flow the publish job uses. Read is all a
+      # build needs, so unlike the push credential it is not per-repository.
+      - name: Authenticate registry pulls
+        run: |
+          mkdir -p ~/.docker
+          if [ -s ~/.docker/config.json ]; then
+            jq '.credHelpers["registry.doover.com"] = "doover"' \
+              ~/.docker/config.json > /tmp/docker-config.json
+          else
+            echo '{"credHelpers":{"registry.doover.com":"doover"}}' > /tmp/docker-config.json
+          fi
+          mv /tmp/docker-config.json ~/.docker/config.json
+
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.app.dir }}
