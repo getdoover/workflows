@@ -228,6 +228,10 @@ jobs:
   # app's own imports, native wheels — inside the built image, where a missing
   # system library actually shows up. Carried over verbatim in intent.
   smoke:
+    # Bounded because a hang otherwise runs to GitHub's six-hour default,
+    # and force-cancelling a run discards its logs -- so the one thing you
+    # need to diagnose it is exactly what you lose. one native build.
+    timeout-minutes: 30
     needs: discover
     if: needs.discover.outputs.images != '[]'
     runs-on: ${{ inputs.runs-on }}
@@ -304,6 +308,10 @@ jobs:
   # repo with more than one app. Keeping the digest inside one job removes that
   # class of bug entirely.
   publish:
+    # Bounded because a hang otherwise runs to GitHub's six-hour default,
+    # and force-cancelling a run discards its logs -- so the one thing you
+    # need to diagnose it is exactly what you lose. a four-arch cold build is the slowest thing here.
+    timeout-minutes: 45
     needs: [discover, check, test, test_rust, smoke]
     if: |
       always() && needs.discover.outputs.images != '[]'
