@@ -13,9 +13,16 @@ on:
         default: "."
       staging:
         description: >
-          Also publish and release to the staging control plane. The image itself
-          is only ever pushed to the production registry (see NOTES.md), so this
-          publishes with --no-build against a digest that already exists.
+          Also publish and release to the staging control plane, against the
+          digest built for production. Whether the image itself reaches
+          staging's registry is `staging_image`.
+        type: boolean
+        required: false
+        default: false
+      staging_image:
+        description: >
+          Also copy the built image into staging's own registry. Needs `staging`
+          and `release`.
         type: boolean
         required: false
         default: false
@@ -378,9 +385,50 @@ jobs:
           --notes "$RELEASE_NOTES"
           ${{ github.event_name == 'pull_request' && '--alpha' || '' }}
 
-      # The image only ever lives in the production registry, so staging gets the
-      # app record and version against a digest that already exists — never a
-      # second build, and never a push to a second registry.
+      - name: Publish the app to staging
+        if: inputs.release && inputs.staging
+        env:
+          DOOVER_CONTROL_API_BASE_URL: https://api.staging.udoover.com
+          DOOVER_OIDC_AUDIENCE: https://api.staging.udoover.com
+        run: >-
+          doover app publish "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
+          --no-build --no-release
+
+      - id: staging_login
+        name: Log in to the staging registry
+        if: inputs.release && inputs.staging && inputs.staging_image
+        env:
+          DOOVER_CONTROL_API_BASE_URL: https://api.staging.udoover.com
+          DOOVER_OIDC_AUDIENCE: https://api.staging.udoover.com
+        run: doover app registry-login --app-name "${{ matrix.app.name }}"
+
+      - name: Copy the image into the staging registry
+        if: inputs.release && inputs.staging && inputs.staging_image
+        env:
+          SOURCE_IMAGE: ${{ matrix.app.image_name }}
+          SOURCE_DIGEST: ${{ steps.push.outputs.digest }}
+          STAGING_REPOSITORY: ${{ steps.staging_login.outputs.image }}
+        run: |
+          case "${SOURCE_IMAGE##*/}" in
+            *:*) TAG="${SOURCE_IMAGE##*:}" ;;
+            *)   TAG="latest" ;;
+          esac
+          SOURCE_REPOSITORY="${SOURCE_IMAGE%:$TAG}"
+
+          # An environment whose registry is the production one has nothing to
+          # copy -- the bytes are already where the release will look.
+          if [ "$SOURCE_REPOSITORY" = "$STAGING_REPOSITORY" ]; then
+            echo "staging shares the production registry; nothing to copy."
+            exit 0
+          fi
+
+          echo "Copying $SOURCE_REPOSITORY@$SOURCE_DIGEST -> $STAGING_REPOSITORY:$TAG"
+          docker buildx imagetools create \
+            --tag "$STAGING_REPOSITORY:$TAG" \
+            "$SOURCE_REPOSITORY@$SOURCE_DIGEST"
+
+          docker buildx imagetools inspect "$STAGING_REPOSITORY@$SOURCE_DIGEST" > /dev/null
+
       - name: Also release to staging
         if: inputs.release && inputs.staging
         env:
@@ -388,9 +436,7 @@ jobs:
           DOOVER_OIDC_AUDIENCE: https://api.staging.udoover.com
           RELEASE_NOTES: ${{ github.event.head_commit.message || github.event.pull_request.title }}
         run: >-
-          doover app publish "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
-          --no-build --no-release
-          && doover app release "${{ matrix.app.dir }}"
+          doover app release "${{ matrix.app.dir }}"
           --app-name "${{ matrix.app.name }}"
           --digest "${{ steps.push.outputs.digest }}"
           --commit "${{ github.event.pull_request.head.sha || github.sha }}"
