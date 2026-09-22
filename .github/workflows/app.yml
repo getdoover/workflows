@@ -358,7 +358,7 @@ jobs:
       - name: Register the app and log in to the registry
         run: |
           doover app publish "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}" --no-release
-          doover app registry-login --app-name "${{ matrix.app.name }}"
+          doover app registry-login "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
 
       - id: push
         name: Build and push
@@ -400,7 +400,7 @@ jobs:
         env:
           DOOVER_CONTROL_API_BASE_URL: https://api.staging.udoover.com
           DOOVER_OIDC_AUDIENCE: https://api.staging.udoover.com
-        run: doover app registry-login --app-name "${{ matrix.app.name }}"
+        run: doover app registry-login "${{ matrix.app.dir }}" --app-name "${{ matrix.app.name }}"
 
       - name: Copy the image into the staging registry
         if: inputs.release && inputs.staging && inputs.staging_image
